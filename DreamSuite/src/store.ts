@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import { supabase } from './lib/supabase';
+import { api } from './lib/api';
+import { logger } from './lib/logger';
 import { Dream, DreamStore, DreamPatterns, Subscription } from './types';
 
 export const useDreamStore = create<DreamStore>((set, get) => ({
@@ -11,6 +13,7 @@ export const useDreamStore = create<DreamStore>((set, get) => ({
 
   checkSubscription: async () => {
     try {
+      logger.info('Checking subscription status');
       const { data, error } = await supabase
         .from('subscriptions')
         .select('*')
@@ -20,38 +23,40 @@ export const useDreamStore = create<DreamStore>((set, get) => ({
       if (error) throw error;
 
       set({ subscription: data as Subscription });
+      logger.info('Subscription status updated', { status: data.status });
     } catch (error) {
-      console.error('Error checking subscription:', error);
+      logger.error('Failed to check subscription', { error: error.message });
     }
   },
 
   subscribe: async () => {
     try {
       set({ loading: true, error: null });
+      logger.info('Initiating subscription process');
       
-      // Create Stripe Checkout session
-      const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/create-checkout`, {
+      const response = await api('/functions/v1/create-checkout', {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
+        body: {
           user_id: get().user?.id,
           email: get().user?.email,
-        }),
+        },
       });
 
-      const { url } = await response.json();
-      window.location.href = url;
+      window.open(response.url, '_blank');
+      logger.info('Subscription checkout initiated');
     } catch (error) {
-      set({ error: error.message, loading: false });
+      logger.error('Subscription error', { error: error.message });
+      set({ error: error.message });
+    } finally {
+      set({ loading: false });
     }
   },
 
   addDream: async (dream) => {
     try {
       set({ loading: true, error: null });
+      logger.info('Adding new dream');
+
       const { data, error } = await supabase
         .from('dreams')
         .insert([{ ...dream, user_id: get().user?.id }])
@@ -64,7 +69,10 @@ export const useDreamStore = create<DreamStore>((set, get) => ({
         dreams: [...state.dreams, data as Dream],
         loading: false,
       }));
+
+      logger.info('Dream added successfully', { dreamId: data.id });
     } catch (error) {
+      logger.error('Failed to add dream', { error: error.message });
       set({ error: error.message, loading: false });
     }
   },
@@ -72,6 +80,7 @@ export const useDreamStore = create<DreamStore>((set, get) => ({
   removeDream: async (id) => {
     try {
       set({ loading: true, error: null });
+      logger.info('Removing dream', { dreamId: id });
       const { error } = await supabase
         .from('dreams')
         .delete()
@@ -83,7 +92,9 @@ export const useDreamStore = create<DreamStore>((set, get) => ({
         dreams: state.dreams.filter((dream) => dream.id !== id),
         loading: false,
       }));
+      logger.info('Dream removed successfully', { dreamId: id });
     } catch (error) {
+      logger.error('Failed to remove dream', { error: error.message });
       set({ error: error.message, loading: false });
     }
   },
@@ -91,33 +102,30 @@ export const useDreamStore = create<DreamStore>((set, get) => ({
   interpretDream: async (id) => {
     try {
       set({ loading: true, error: null });
+      logger.info('Interpreting dream', { dreamId: id });
       const dream = get().dreams.find((d) => d.id === id);
       if (!dream) throw new Error('Dream not found');
 
-      // Check subscription status for premium interpretations
       if (dream.subscription_required) {
         const subscription = get().subscription;
         if (!subscription || subscription.status !== 'active') {
+          logger.warn('Premium subscription required for interpretation');
           set({ error: 'Premium subscription required', loading: false });
           return;
         }
       }
 
-      const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/interpret-dream`, {
+      const response = await api('/functions/v1/interpret-dream', {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
+        body: {
           description: dream.description,
           emotions: dream.emotions,
           tags: dream.tags,
           premium: dream.subscription_required,
-        }),
+        },
       });
 
-      const { interpretation } = await response.json();
+      const { interpretation } = response;
 
       const { error } = await supabase
         .from('dreams')
@@ -132,7 +140,9 @@ export const useDreamStore = create<DreamStore>((set, get) => ({
         ),
         loading: false,
       }));
+      logger.info('Dream interpretation completed', { dreamId: id });
     } catch (error) {
+      logger.error('Failed to interpret dream', { error: error.message });
       set({ error: error.message, loading: false });
     }
   },
@@ -140,6 +150,7 @@ export const useDreamStore = create<DreamStore>((set, get) => ({
   fetchDreams: async () => {
     try {
       set({ loading: true, error: null });
+      logger.info('Fetching dreams');
       const { data, error } = await supabase
         .from('dreams')
         .select('*')
@@ -148,12 +159,15 @@ export const useDreamStore = create<DreamStore>((set, get) => ({
       if (error) throw error;
 
       set({ dreams: data as Dream[], loading: false });
+      logger.info('Dreams fetched successfully', { count: data.length });
     } catch (error) {
+      logger.error('Failed to fetch dreams', { error: error.message });
       set({ error: error.message, loading: false });
     }
   },
 
   getDreamPatterns: () => {
+    logger.info('Calculating dream patterns');
     const dreams = get().dreams;
     const patterns: DreamPatterns = {
       emotionFrequency: [],
@@ -162,7 +176,6 @@ export const useDreamStore = create<DreamStore>((set, get) => ({
       monthlyDreamCount: [],
     };
 
-    // Calculate emotion frequency
     const emotionCount = new Map<string, number>();
     dreams.forEach((dream) => {
       dream.emotions.forEach((emotion) => {
@@ -174,7 +187,6 @@ export const useDreamStore = create<DreamStore>((set, get) => ({
       count,
     }));
 
-    // Calculate dream type distribution
     const typeCount = new Map<string, number>();
     dreams.forEach((dream) => {
       if (dream.dream_type) {
@@ -186,7 +198,6 @@ export const useDreamStore = create<DreamStore>((set, get) => ({
       value,
     }));
 
-    // Calculate recurring themes
     const themeCount = new Map<string, number>();
     dreams.forEach((dream) => {
       dream.tags.forEach((tag) => {
@@ -197,7 +208,6 @@ export const useDreamStore = create<DreamStore>((set, get) => ({
       .map(([theme, count]) => ({ theme, count }))
       .filter((item) => item.count > 1);
 
-    // Calculate monthly dream count
     const monthCount = new Map<string, number>();
     dreams.forEach((dream) => {
       const month = new Date(dream.date).toLocaleString('default', { month: 'long' });
@@ -208,12 +218,14 @@ export const useDreamStore = create<DreamStore>((set, get) => ({
       count,
     }));
 
+    logger.info('Dream patterns calculated');
     return patterns;
   },
 
   signIn: async (email: string, password: string) => {
     try {
       set({ loading: true, error: null });
+      logger.info('Signing in user', { email });
       const { data, error } = await supabase.auth.signInWithPassword({
         email,
         password,
@@ -225,7 +237,9 @@ export const useDreamStore = create<DreamStore>((set, get) => ({
         user: { id: data.user.id, email: data.user.email! },
         loading: false,
       });
+      logger.info('User signed in successfully', { userId: data.user.id });
     } catch (error) {
+      logger.error('Sign in failed', { error: error.message });
       set({ error: error.message, loading: false });
     }
   },
@@ -233,6 +247,7 @@ export const useDreamStore = create<DreamStore>((set, get) => ({
   signUp: async (email: string, password: string) => {
     try {
       set({ loading: true, error: null });
+      logger.info('Signing up new user', { email });
       const { data, error } = await supabase.auth.signUp({
         email,
         password,
@@ -244,7 +259,9 @@ export const useDreamStore = create<DreamStore>((set, get) => ({
         user: { id: data.user!.id, email: data.user!.email! },
         loading: false,
       });
+      logger.info('User signed up successfully', { userId: data.user!.id });
     } catch (error) {
+      logger.error('Sign up failed', { error: error.message });
       set({ error: error.message, loading: false });
     }
   },
@@ -252,11 +269,14 @@ export const useDreamStore = create<DreamStore>((set, get) => ({
   signOut: async () => {
     try {
       set({ loading: true, error: null });
+      logger.info('Signing out user');
       const { error } = await supabase.auth.signOut();
       if (error) throw error;
 
       set({ user: null, dreams: [], loading: false });
+      logger.info('User signed out successfully');
     } catch (error) {
+      logger.error('Sign out failed', { error: error.message });
       set({ error: error.message, loading: false });
     }
   },
